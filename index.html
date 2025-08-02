@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>Pecera 3D: Esfera que vibra con la música</title>
+<title>Pecera 3D: Esfera flabber bailando con música</title>
 <style>
   body { margin: 0; overflow: hidden; background: black; }
   canvas { display: block; cursor: grab; touch-action: none; }
@@ -28,6 +28,17 @@
   }
   #edge-top { top: 0; background: linear-gradient(to bottom, rgba(255,0,255,0.3), transparent); }
   #edge-bottom { bottom: 0; background: linear-gradient(to top, rgba(0,255,255,0.3), transparent); }
+
+  #lockStatus {
+    position: fixed;display:none;
+    top: 20px;
+    left: 20px;
+    color: transparent;
+    font-weight: bold;
+    font-family: monospace;
+    user-select: none;
+    z-index: 20;
+  }
 </style>
 </head>
 <body>
@@ -37,6 +48,8 @@
 <div id="edge-top" class="edge-overlay"></div>
 <div id="edge-bottom" class="edge-overlay"></div>
 
+<div id="lockStatus">Unlocked</div>
+
 <script src="https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.min.js"></script>
 <script>
 const scene = new THREE.Scene();
@@ -45,15 +58,24 @@ const renderer = new THREE.WebGLRenderer({antialias:true});
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-const light = new THREE.PointLight(0x00FFFF, 50);
-light.position.set(10,10,10);
-scene.add(light);
+const pointLight = new THREE.PointLight(0x00FFFF, 50);
+pointLight.position.set(10,10,10);
+scene.add(pointLight);
 scene.add(new THREE.AmbientLight(0xffffff, 0.5));
 
 const radius = 3;
 const geometry = new THREE.SphereGeometry(radius, 100, 100);
+
+let basePositions = new Float32Array(geometry.attributes.position.array);
+const positionAttribute = geometry.attributes.position;
+const vertexCount = positionAttribute.count;
+
+// Shader material with dynamic color
 const material = new THREE.ShaderMaterial({
   wireframe: true,
+  uniforms: {
+    colorMix: { value: 0.0 }
+  },
   vertexShader: `
     varying vec3 vPosition;
     void main() {
@@ -63,24 +85,33 @@ const material = new THREE.ShaderMaterial({
   `,
   fragmentShader: `
     varying vec3 vPosition;
+    uniform float colorMix; // 0 = normal, 1 = lime flash
+
     vec3 magenta = vec3(1.0,0.0,1.0);
     vec3 cyan = vec3(0.0,1.0,1.0);
+    vec3 lime = vec3(0.5,1.0,0.0);
+
     void main() {
-      float mixValue = (vPosition.x + ${radius.toFixed(1)}) / ${(radius*2).toFixed(1)};
-      vec3 color = mix(magenta, cyan, mixValue);
+      float baseMix = (vPosition.x + ${radius.toFixed(1)}) / ${(radius*2).toFixed(1)};
+      vec3 baseColor = mix(magenta, cyan, baseMix);
+      vec3 color = mix(baseColor, lime, colorMix);
       gl_FragColor = vec4(color,1.0);
     }
   `
 });
+
 const sphere = new THREE.Mesh(geometry, material);
 scene.add(sphere);
-const positionAttribute = geometry.attributes.position;
-const vertexCount = positionAttribute.count;
-const basePositions = new Float32Array(positionAttribute.array);
 
 const boxSize = 20;
 const boxGeometry = new THREE.BoxGeometry(boxSize, boxSize, boxSize);
-const boxMaterial = new THREE.MeshBasicMaterial({color:0xffffff, wireframe:true});
+const boxMaterial = new THREE.MeshBasicMaterial({
+  color: 0xffffff,
+  wireframe: true,
+  transparent: true,
+  opacity: 0 // Adjust this value to control transparency
+});
+
 const box = new THREE.Mesh(boxGeometry, boxMaterial);
 scene.add(box);
 
@@ -105,52 +136,173 @@ const keys = {};
 window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
 window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
 
-// 🎵 AUDIO ANALYSIS SETUP
+// --- AUDIO SETUP ---
 let audioCtx, analyser, dataArray;
+let audioSource;
 let audioReady = false;
 
 const audio = new Audio('https://raw.githubusercontent.com/profedani1/songs/main/molotov.mp3');
 audio.crossOrigin = "anonymous";
 audio.loop = true;
-audio.autoplay = true;
+audio.preload = "auto";
 
-audio.addEventListener('canplay', () => {
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const source = audioCtx.createMediaElementSource(audio);
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 128;
-  dataArray = new Uint8Array(analyser.frequencyBinCount);
+let isPlaying = false;
 
-  source.connect(analyser);
-  analyser.connect(audioCtx.destination);
-  audioReady = true;
+// Initialize audio context and analyser on first play
+async function initAudio() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    audioSource = audioCtx.createMediaElementSource(audio);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    audioSource.connect(analyser);
+    analyser.connect(audioCtx.destination);
+  }
+}
+
+// --- LOCK CAMERA VIEW ON LEFT+RIGHT CLICK ---
+
+let leftDown = false;
+let rightDown = false;
+let viewLocked = false;
+const lockStatus = document.getElementById('lockStatus');
+
+function updateLockStatus() {
+  lockStatus.textContent = viewLocked ? 'View Locked' : 'Unlocked';
+  lockStatus.style.color = viewLocked ? 'lime' : 'white';
+}
+
+renderer.domElement.addEventListener('mousedown', e => {
+  if (e.button === 0) leftDown = true;
+  if (e.button === 2) rightDown = true;
+
+  if (leftDown && rightDown) {
+    viewLocked = !viewLocked;
+    updateLockStatus();
+  }
+
+  if (!viewLocked && e.button === 0) {
+    isDraggingSphere = true;
+    lastMouse.x = e.clientX;
+    lastMouse.y = e.clientY;
+  }
+});
+renderer.domElement.addEventListener('mouseup', e => {
+  if (e.button === 0) leftDown = false;
+  if (e.button === 2) rightDown = false;
+  isDraggingSphere = false;
+});
+renderer.domElement.addEventListener('mouseleave', () => {
+  isDraggingSphere = false;
+  leftDown = false;
+  rightDown = false;
+});
+renderer.domElement.addEventListener('mousemove', e => {
+  mousePos.x = e.clientX;
+  mousePos.y = e.clientY;
+
+  if(!viewLocked && isDraggingSphere) {
+    const dx = e.clientX - lastMouse.x;
+    const dy = e.clientY - lastMouse.y;
+    sphereAngleY += dx * sphereDragSensitivity;
+    sphereAngleX += dy * sphereDragSensitivity;
+    sphereAngleX = Math.max(-sphereLimit, Math.min(sphereAngleX, sphereLimit));
+    sphere.rotation.y = sphereAngleY;
+    sphere.rotation.x = sphereAngleX;
+    lastMouse.x = e.clientX;
+    lastMouse.y = e.clientY;
+  } else if (!viewLocked) {
+    // Adjust camera yaw/pitch with mouse movement if not locked and not dragging sphere
+    const dx = e.movementX || e.clientX - lastMouse.x;
+    const dy = e.movementY || e.clientY - lastMouse.y;
+    camYaw -= dx * camMouseSensitivity;
+    camPitch -= dy * camMouseSensitivity;
+    camPitch = Math.max(-camPitchLimit, Math.min(camPitch, camPitch));
+    lastMouse.x = e.clientX;
+    lastMouse.y = e.clientY;
+  }
 });
 
-audio.play();
+// Prevent context menu on right click
+document.addEventListener('contextmenu', e => {
+  e.preventDefault();
+});
 
-// 🌀 DISTORTION WITH AUDIO
+window.addEventListener('wheel', e => {
+  e.preventDefault();
+  const zoomSpeed = 0.005;
+  const zoomAmount = -e.deltaY * zoomSpeed;
+  const lookDir = new THREE.Vector3(
+    Math.cos(camPitch)*Math.sin(camYaw),
+    Math.sin(camPitch),
+    Math.cos(camPitch)*Math.cos(camYaw)
+  );
+  camPosTarget.add(lookDir.multiplyScalar(zoomAmount));
+}, { passive: false });
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// --- FLABBER DANCING WOBBLING & COLOR CHANGE on BEAT ---
+
+// Smooth oscillation helper
+function smoothOscillation(time, freq=3, phase=0, amplitude=1) {
+  return amplitude * Math.sin(freq * time + phase);
+}
+
 function distortGeometry(time) {
+  if (!audioReady && analyser) audioReady = true;
   if (audioReady && analyser) {
     analyser.getByteFrequencyData(dataArray);
-    let sum = 0;
-    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-    const avg = sum / dataArray.length;
-    const audioFactor = avg / 255;
-    const strength = 0.4 + audioFactor * 1.5;
 
-    for (let i = 0; i < vertexCount; i++) {
-      const ix = i * 3;
-      let x = basePositions[ix];
-      let y = basePositions[ix+1];
-      let z = basePositions[ix+2];
+    // Calculate overall volume / beat strength (RMS-like)
+    let sumSquares = 0;
+    for (let i=0; i < dataArray.length; i++) {
+      const val = dataArray[i]/255;
+      sumSquares += val * val;
+    }
+    const rms = Math.sqrt(sumSquares / dataArray.length);
 
-      const len = Math.sqrt(x*x + y*y + z*z);
-      const offset = strength * Math.sin(Math.PI*x + time) * Math.cos(Math.PI*y + time);
-      const scale = (radius + offset) / len;
+    // Use RMS for wobbling amplitude, capped reasonably
+    const wobbleAmp = 0.5 * rms;
 
-      positionAttribute.array[ix] = x * scale;
-      positionAttribute.array[ix+1] = y * scale;
-      positionAttribute.array[ix+2] = z * scale;
+    // Flash color when beat is strong enough
+    let flashThreshold = 0.35;
+    let colorMix = (rms > flashThreshold) ? (rms - flashThreshold)*4 : 0.0;
+    colorMix = Math.min(colorMix, 1.0);
+    material.uniforms.colorMix.value = colorMix;
+
+    for(let i=0; i < vertexCount; i++) {
+      const ix = i*3;
+      let x0 = basePositions[ix];
+      let y0 = basePositions[ix+1];
+      let z0 = basePositions[ix+2];
+
+      // Calculate a blob-like oscillation on radius using spherical coords
+      const len0 = Math.sqrt(x0*x0 + y0*y0 + z0*z0);
+      const normX = x0 / len0;
+      const normY = y0 / len0;
+      const normZ = z0 / len0;
+
+      // Oscillate radius with combination of sines for fun effect
+      let osc = 0;
+      osc += smoothOscillation(time, 3, normX * 10, wobbleAmp);
+      osc += smoothOscillation(time, 5, normY * 15, wobbleAmp * 0.7);
+      osc += smoothOscillation(time, 7, normZ * 20, wobbleAmp * 0.5);
+
+      // Add a slow pulse
+      osc += wobbleAmp * 0.2 * Math.sin(time * 1.5 + normX*normY*normZ*50);
+
+      const newRadius = radius + osc;
+
+      positionAttribute.array[ix] = normX * newRadius;
+      positionAttribute.array[ix+1] = normY * newRadius;
+      positionAttribute.array[ix+2] = normZ * newRadius;
     }
     positionAttribute.needsUpdate = true;
   }
@@ -193,7 +345,7 @@ const edgeSize = 150;
 const autoLookSpeed = 0.02;
 
 function autoRotateViewByMousePosition() {
-  if(isDraggingSphere) return;
+  if(viewLocked || isDraggingSphere) return;
   if(mousePos.x < edgeSize) camYaw += autoLookSpeed * (edgeSize - mousePos.x) / edgeSize;
   else if(mousePos.x > window.innerWidth - edgeSize) camYaw -= autoLookSpeed * (mousePos.x - (window.innerWidth - edgeSize)) / edgeSize;
   if(mousePos.y < edgeSize) camPitch += autoLookSpeed * (edgeSize - mousePos.y) / edgeSize;
@@ -202,54 +354,50 @@ function autoRotateViewByMousePosition() {
   camPitch = Math.max(-camPitchLimit, Math.min(camPitch, camPitch));
 }
 
-renderer.domElement.addEventListener('mousedown', e => {
-  isDraggingSphere = true;
-  lastMouse.x = e.clientX;
-  lastMouse.y = e.clientY;
-});
-renderer.domElement.addEventListener('mouseup', () => isDraggingSphere = false);
-renderer.domElement.addEventListener('mouseleave', () => isDraggingSphere = false);
-renderer.domElement.addEventListener('mousemove', e => {
-  mousePos.x = e.clientX;
-  mousePos.y = e.clientY;
+// --- Play/pause toggle by clicking the sphere ---
 
-  if(isDraggingSphere) {
-    const dx = e.clientX - lastMouse.x;
-    const dy = e.clientY - lastMouse.y;
-    sphereAngleY += dx * sphereDragSensitivity;
-    sphereAngleX += dy * sphereDragSensitivity;
-    sphereAngleX = Math.max(-sphereLimit, Math.min(sphereAngleX, sphereLimit));
-    sphere.rotation.y = sphereAngleY;
-    sphere.rotation.x = sphereAngleX;
-    lastMouse.x = e.clientX;
-    lastMouse.y = e.clientY;
-  } else {
-    const dx = e.movementX || e.clientX - lastMouse.x;
-    const dy = e.movementY || e.clientY - lastMouse.y;
-    camYaw -= dx * camMouseSensitivity;
-    camPitch -= dy * camMouseSensitivity;
-    camPitch = Math.max(-camPitchLimit, Math.min(camPitch, camPitch));
-    lastMouse.x = e.clientX;
-    lastMouse.y = e.clientY;
-  }
-});
+// Track clicks for double-click-like toggle
+let lastClickTime = 0;
+const doubleClickThreshold = 300; // ms
 
-window.addEventListener('wheel', e => {
-  e.preventDefault();
-  const zoomSpeed = 0.005;
-  const zoomAmount = -e.deltaY * zoomSpeed;
-  const lookDir = new THREE.Vector3(
-    Math.cos(camPitch)*Math.sin(camYaw),
-    Math.sin(camPitch),
-    Math.cos(camPitch)*Math.cos(camYaw)
+renderer.domElement.addEventListener('click', async (event) => {
+  // If dragging, ignore click to avoid toggling
+  if (isDraggingSphere) return;
+
+  // Use raycaster to detect if click is on the sphere
+  const mouse = new THREE.Vector2(
+    (event.clientX / window.innerWidth) * 2 - 1,
+    - (event.clientY / window.innerHeight) * 2 + 1
   );
-  camPosTarget.add(lookDir.multiplyScalar(zoomAmount));
-}, { passive: false });
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(mouse, camera);
+  const intersects = raycaster.intersectObject(sphere);
 
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth/window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  if (intersects.length > 0) {
+    const now = performance.now();
+    if (now - lastClickTime < doubleClickThreshold) {
+      // Double click detected: toggle pause/play
+      if (isPlaying) {
+        audio.pause();
+        isPlaying = false;
+      } else {
+        await initAudio();
+        if (audioCtx.state === 'suspended') await audioCtx.resume();
+        audio.play();
+        isPlaying = true;
+      }
+      lastClickTime = 0; // reset to avoid triple toggle
+    } else {
+      // Single click: start playing if stopped
+      if (!isPlaying) {
+        await initAudio();
+        if (audioCtx.state === 'suspended') await audioCtx.resume();
+        audio.play();
+        isPlaying = true;
+      }
+      lastClickTime = now;
+    }
+  }
 });
 
 function animate(t=0) {
